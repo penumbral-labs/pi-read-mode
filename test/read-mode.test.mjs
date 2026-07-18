@@ -1,0 +1,248 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { createJiti } from "jiti";
+
+const jiti = createJiti(import.meta.url);
+const extension = await jiti.import("../index.ts");
+const {
+  ReadModeComponent,
+  default: registerReadMode,
+  editDraftInExternalEditor,
+  getExternalEditorCommand,
+  splitEditorCommand,
+} = extension;
+
+const theme = {
+  fg(_color, text) {
+    return text;
+  },
+};
+
+function fakeKeybindings() {
+  return {
+    matches(data, action) {
+      if (action === "app.editor.external") return data === "\x07";
+      return false;
+    },
+  };
+}
+
+function makeTui(rows = 16) {
+  const writes = [];
+  return {
+    children: [],
+    renders: [],
+    started: 0,
+    stopped: 0,
+    terminal: {
+      rows,
+      columns: 80,
+      write(data) {
+        writes.push(data);
+      },
+    },
+    writes,
+    requestRender(force) {
+      this.renders.push(force === true);
+    },
+    start() {
+      this.started++;
+    },
+    stop() {
+      this.stopped++;
+    },
+  };
+}
+
+function makeReadMode({ rows = 16, historyLines = 24 } = {}) {
+  const tui = makeTui(rows);
+  const doneResults = [];
+  const history = {
+    invalidate() {},
+    render() {
+      return Array.from({ length: historyLines }, (_, i) => `history-${String(i + 1).padStart(2, "0")}`);
+    },
+  };
+  const component = new ReadModeComponent(tui, theme, fakeKeybindings(), (result) => doneResults.push(result));
+  const container = {
+    children: [component],
+    invalidate() {},
+    render(width) {
+      return component.render(width);
+    },
+  };
+  tui.children = [history, container];
+  return { component, tui, doneResults };
+}
+
+async function mount(component, width = 60) {
+  component.render(width);
+  await new Promise((resolve) => setImmediate(resolve));
+  return component.render(width);
+}
+
+function input(component, text) {
+  for (const char of text) component.handleInput(char);
+}
+
+test("extension registers /read and Alt+R", () => {
+  const registered = { commands: [], shortcuts: [] };
+
+  registerReadMode({
+    registerCommand(name, options) {
+      registered.commands.push({ name, options });
+    },
+    registerShortcut(shortcut, options) {
+      registered.shortcuts.push({ shortcut, options });
+    },
+  });
+
+  assert.equal(registered.commands[0].name, "read");
+  assert.equal(registered.shortcuts[0].shortcut, "alt+r");
+});
+
+test("openReadMode sends submitted multiline text once", async () => {
+  let mounted;
+  const sent = [];
+
+  await extension.openReadMode(
+    {
+      sendUserMessage(text) {
+        sent.push(text);
+      },
+    },
+    {
+      async custom(factory) {
+        const tui = makeTui();
+        const component = factory(tui, theme, fakeKeybindings(), (result) => {
+          mounted.result = result;
+        });
+        mounted = { component, result: undefined };
+        component.setDraft("first\nsecond");
+        component.handleInput("\r");
+        return mounted.result;
+      },
+    },
+  );
+
+  assert.deepEqual(sent, ["first\nsecond"]);
+});
+
+test("native editor accepts newline input and submits multiline text once", async () => {
+  const { component, doneResults } = makeReadMode();
+  await mount(component);
+
+  input(component, "first line");
+  component.handleInput("\n");
+  input(component, "second line");
+  component.handleInput("\r");
+
+  assert.deepEqual(doneResults, [{ text: "first line\nsecond line" }]);
+});
+
+test("unmodified navigation stays with editor while Alt navigation scrolls history", async () => {
+  const { component } = makeReadMode({ rows: 14, historyLines: 40 });
+  await mount(component);
+  component.render(60);
+  const initialOffset = component.scrollOffset;
+
+  component.handleInput("\x1b[A");
+  assert.equal(component.scrollOffset, initialOffset, "plain Up must not scroll history");
+
+  component.handleInput("\x1b[1;3A");
+  assert.equal(component.scrollOffset, initialOffset - 1, "Alt+Up scrolls history one line");
+
+  component.handleInput("\x1b[1;3F");
+  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows, "Alt+End jumps to bottom");
+
+  component.handleInput("\x1b[1;3H");
+  assert.equal(component.scrollOffset, 0, "Alt+Home jumps to top");
+
+  component.handleInput("\x1b[6;3~");
+  assert.equal(component.scrollOffset, Math.max(1, component.viewportRows - 2), "Alt+PageDown scrolls by page");
+});
+
+test("mouse wheel scrolls history while composing", async () => {
+  const { component } = makeReadMode({ rows: 14, historyLines: 40 });
+  await mount(component);
+  component.handleInput("\x1b[1;3H");
+
+  component.handleInput("\x1b[<65;1;1M");
+  assert.equal(component.scrollOffset, 3);
+
+  component.handleInput("\x1b[<64;1;1M");
+  assert.equal(component.scrollOffset, 0);
+});
+
+test("composer growth reduces history viewport and render stays bounded", async () => {
+  const { component, tui } = makeReadMode({ rows: 14, historyLines: 40 });
+  const initial = await mount(component, 50);
+  const initialViewportRows = component.viewportRows;
+
+  component.setDraft(["one", "two", "three", "four", "five", "six"].join("\n"));
+  const grown = component.render(50);
+
+  assert.equal(initial.length, tui.terminal.rows);
+  assert.equal(grown.length, tui.terminal.rows);
+  assert.ok(component.viewportRows < initialViewportRows);
+});
+
+test("focus propagates to the embedded editor cursor marker", async () => {
+  const { component } = makeReadMode({ rows: 12, historyLines: 4 });
+  await mount(component, 50);
+
+  component.focused = true;
+  assert.match(component.render(50).join("\n"), /\x1b_pi:c\x07/);
+
+  component.focused = false;
+  assert.doesNotMatch(component.render(50).join("\n"), /\x1b_pi:c\x07/);
+});
+
+test("external editor helpers resolve and split editor commands", () => {
+  assert.equal(getExternalEditorCommand({ VISUAL: "nvim", EDITOR: "vim" }, "darwin"), "nvim");
+  assert.equal(getExternalEditorCommand({ EDITOR: "vim" }, "darwin"), "vim");
+  assert.equal(getExternalEditorCommand({}, "win32"), "notepad");
+  assert.deepEqual(splitEditorCommand('"/Applications/MacVim.app/Contents/bin/mvim" --wait'), [
+    "/Applications/MacVim.app/Contents/bin/mvim",
+    "--wait",
+  ]);
+});
+
+test("external editor success replaces draft, restores TUI, redraws, and removes temp file", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  const tui = makeTui();
+  const command = `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync(process.argv.at(-1), 'edited\\n')"`;
+
+  const edited = await editDraftInExternalEditor("draft", tui, {
+    editorCommand: command,
+    tmpDir: tmp,
+    announce: false,
+  });
+
+  assert.equal(edited, "edited");
+  assert.equal(tui.stopped, 1);
+  assert.equal(tui.started, 1);
+  assert.deepEqual(tui.renders, [true]);
+  assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+});
+
+test("external editor failure preserves draft by returning undefined and still restores TUI", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  const tui = makeTui();
+  const command = `${JSON.stringify(process.execPath)} -e "process.exit(2)"`;
+
+  const edited = await editDraftInExternalEditor("draft", tui, {
+    editorCommand: command,
+    tmpDir: tmp,
+    announce: false,
+  });
+
+  assert.equal(edited, undefined);
+  assert.equal(tui.stopped, 1);
+  assert.equal(tui.started, 1);
+  assert.deepEqual(tui.renders, [true]);
+  assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+});

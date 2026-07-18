@@ -5,3 +5,7 @@ dist/
 *.d.ts
 *.map
 .DS_Store
+.scratch/
+.pi-subagents/
+.pi/
+.impeccable/

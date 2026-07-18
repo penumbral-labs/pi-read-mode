@@ -1,21 +1,55 @@
 {
-  "name": "pi-read-mode",
+  "name": "@penumbral-labs/pi-read-mode",
   "version": "1.0.0",
-  "description": "Scroll through conversation history while composing a follow-up",
+  "description": "Scroll through conversation history while composing a multiline follow-up",
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "read-mode",
+    "terminal",
+    "composer"
+  ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
-  "files": ["index.ts", "README.md", "LICENSE"],
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
+    "@types/node": "^24.0.0",
+    "jiti": "^2.7.0",
+    "typescript": "^5.8.3"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
-  "author": "minghinmatthewlam",
+  "author": "Penumbral Labs",
   "repository": {
     "type": "git",
-    "url": "https://github.com/minghinmatthewlam/pi-read-mode"
+    "url": "git+https://github.com/penumbral-labs/pi-read-mode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/penumbral-labs/pi-read-mode/issues"
+  },
+  "homepage": "https://github.com/penumbral-labs/pi-read-mode#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }
