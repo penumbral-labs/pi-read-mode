@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.pi-subagents/
 *.js
 *.d.ts
 *.map
