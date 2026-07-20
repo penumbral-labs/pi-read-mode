@@ -7,10 +7,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import {
 	CURSOR_MARKER,
@@ -120,17 +119,23 @@ export async function editDraftInExternalEditor(
 	const [editor, ...editorArgs] = splitEditorCommand(editorCommand);
 	if (!editor) return undefined;
 
-	const tmpFile = join(options.tmpDir ?? tmpdir(), `pi-read-mode-${process.pid}-${Date.now()}-${randomUUID()}.md`);
-	writeFileSync(tmpFile, currentText, "utf-8");
+	let draftDir: string | undefined;
+	let tmpFile: string | undefined;
+	let tuiStopped = false;
 
 	try {
+		draftDir = mkdtempSync(join(options.tmpDir ?? tmpdir(), "pi-read-mode-"));
+		tmpFile = join(draftDir, "draft.md");
+		writeFileSync(tmpFile, currentText, { encoding: "utf-8", flag: "wx", mode: 0o600 });
+
 		tui.stop();
+		tuiStopped = true;
 		if (options.announce !== false) {
 			process.stdout.write(`Launching external editor: ${editorCommand}\nPi will resume when the editor exits.\n`);
 		}
 
 		const status = await new Promise<number | null>((resolve) => {
-			const child = spawn(editor, [...editorArgs, tmpFile], {
+			const child = spawn(editor, [...editorArgs, tmpFile!], {
 				stdio: "inherit",
 				shell: process.platform === "win32",
 			});
@@ -141,9 +146,11 @@ export async function editDraftInExternalEditor(
 		if (status !== 0) return undefined;
 		return readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
 	} finally {
-		if (existsSync(tmpFile)) unlinkSync(tmpFile);
-		tui.start();
-		tui.requestRender(true);
+		if (draftDir) rmSync(draftDir, { recursive: true, force: true });
+		if (tuiStopped) {
+			tui.start();
+			tui.requestRender(true);
+		}
 	}
 }
 
@@ -306,6 +313,8 @@ export class ReadModeComponent implements Component, Focusable {
 				this.editor.setText(edited);
 				this.tui.requestRender(true);
 			}
+		} catch {
+			this.tui.requestRender(true);
 		} finally {
 			if (this.fullscreenActive) this.tui.terminal.write("\x1b[?1000h\x1b[?1006h");
 			this.externalEditorOpen = false;

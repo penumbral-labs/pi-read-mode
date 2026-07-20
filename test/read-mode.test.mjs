@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -86,6 +86,10 @@ async function mount(component, width = 60) {
 
 function input(component, text) {
   for (const char of text) component.handleInput(char);
+}
+
+function nodeEditorCommand(code) {
+  return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`;
 }
 
 test("extension registers /read and Alt+R", () => {
@@ -214,7 +218,7 @@ test("external editor helpers resolve and split editor commands", () => {
 test("external editor success replaces draft, restores TUI, redraws, and removes temp file", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
   const tui = makeTui();
-  const command = `${JSON.stringify(process.execPath)} -e "require('node:fs').writeFileSync(process.argv.at(-1), 'edited\\n')"`;
+  const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited\\n')");
 
   const edited = await editDraftInExternalEditor("draft", tui, {
     editorCommand: command,
@@ -232,7 +236,7 @@ test("external editor success replaces draft, restores TUI, redraws, and removes
 test("external editor failure preserves draft by returning undefined and still restores TUI", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
   const tui = makeTui();
-  const command = `${JSON.stringify(process.execPath)} -e "process.exit(2)"`;
+  const command = nodeEditorCommand("process.exit(2)");
 
   const edited = await editDraftInExternalEditor("draft", tui, {
     editorCommand: command,
@@ -246,3 +250,81 @@ test("external editor failure preserves draft by returning undefined and still r
   assert.deepEqual(tui.renders, [true]);
   assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
 });
+
+test("external editor temp creation rejection preserves draft and mouse state", async () => {
+  const { component, tui } = makeReadMode();
+  await mount(component);
+  input(component, "keep this draft");
+
+  const originalEnv = {
+    TMPDIR: process.env.TMPDIR,
+    TMP: process.env.TMP,
+    TEMP: process.env.TEMP,
+  };
+  const missingTmp = join(tmpdir(), `pi-read-mode-missing-${process.pid}-${Date.now()}`, "child");
+  const unhandledRejections = [];
+  const onUnhandledRejection = (reason) => unhandledRejections.push(reason);
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  try {
+    process.env.TMPDIR = missingTmp;
+    process.env.TMP = missingTmp;
+    process.env.TEMP = missingTmp;
+
+    component.handleInput("\x07");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally {
+    for (const [name, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+
+  assert.equal(component.getDraft(), "keep this draft");
+  assert.equal(tui.stopped, 0);
+  assert.equal(tui.started, 0);
+  assert.deepEqual(tui.writes.slice(-2), ["\x1b[?1000l\x1b[?1006l", "\x1b[?1000h\x1b[?1006h"]);
+  assert.ok(tui.renders.includes(true));
+  assert.deepEqual(unhandledRejections, []);
+});
+
+test(
+  "external editor creates owner-only temp drafts on Unix",
+  { skip: process.platform === "win32" ? "POSIX file modes are not portable on Windows" : false },
+  async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+    const modesFile = join(tmp, "modes.json");
+    const tui = makeTui();
+    const command = nodeEditorCommand([
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const draft = process.argv.at(-1);",
+      `fs.writeFileSync(${JSON.stringify(modesFile)}, JSON.stringify({`,
+      "  dir: (fs.statSync(path.dirname(draft)).mode & 0o777).toString(8),",
+      "  file: (fs.statSync(draft).mode & 0o777).toString(8),",
+      "  text: fs.readFileSync(draft, 'utf8'),",
+      "}));",
+    ].join(" "));
+    const oldUmask = process.umask(0);
+
+    try {
+      const edited = await editDraftInExternalEditor("draft", tui, {
+        editorCommand: command,
+        tmpDir: tmp,
+        announce: false,
+      });
+
+      assert.equal(edited, "draft");
+      assert.deepEqual(JSON.parse(readFileSync(modesFile, "utf-8")), {
+        dir: "700",
+        file: "600",
+        text: "draft",
+      });
+      assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+    } finally {
+      process.umask(oldUmask);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+);
