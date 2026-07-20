@@ -57,7 +57,7 @@ function makeTui(rows = 16) {
   };
 }
 
-function makeReadMode({ rows = 16, historyLines = 24 } = {}) {
+function makeReadMode({ rows = 16, historyLines = 24, notifyError = () => {} } = {}) {
   const tui = makeTui(rows);
   const doneResults = [];
   const history = {
@@ -66,7 +66,7 @@ function makeReadMode({ rows = 16, historyLines = 24 } = {}) {
       return Array.from({ length: historyLines }, (_, i) => `history-${String(i + 1).padStart(2, "0")}`);
     },
   };
-  const component = new ReadModeComponent(tui, theme, fakeKeybindings(), (result) => doneResults.push(result));
+  const component = new ReadModeComponent(tui, theme, fakeKeybindings(), (result) => doneResults.push(result), notifyError);
   const container = {
     children: [component],
     invalidate() {},
@@ -251,8 +251,9 @@ test("external editor failure preserves draft by returning undefined and still r
   assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
 });
 
-test("external editor temp creation rejection preserves draft and mouse state", async () => {
-  const { component, tui } = makeReadMode();
+test("external editor temp creation rejection preserves draft, notifies, and restores mouse state", async () => {
+  const notifications = [];
+  const { component, tui } = makeReadMode({ notifyError: (message) => notifications.push(message) });
   await mount(component);
   input(component, "keep this draft");
 
@@ -286,6 +287,7 @@ test("external editor temp creation rejection preserves draft and mouse state", 
   assert.equal(tui.started, 0);
   assert.deepEqual(tui.writes.slice(-2), ["\x1b[?1000l\x1b[?1006l", "\x1b[?1000h\x1b[?1006h"]);
   assert.ok(tui.renders.includes(true));
+  assert.deepEqual(notifications, ["External editor failed"]);
   assert.deepEqual(unhandledRejections, []);
 });
 

@@ -42,9 +42,12 @@ interface ExternalEditorOptions {
 	announce?: boolean;
 }
 
+type NotifyError = (message: string) => void;
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const SCROLL_STEP_MOUSE = 3;
+const EXTERNAL_EDITOR_ERROR_MESSAGE = "External editor failed";
 
 // Pre-compiled regexes for mouse sequence parsing
 const SGR_MOUSE_RE = /^\x1b\[<(\d+);\d+;\d+[Mm]$/;
@@ -192,16 +195,19 @@ export class ReadModeComponent implements Component, Focusable {
 	private startAtBottom = false;
 	private viewportRows = 1;
 	private externalEditorOpen = false;
+	private notifyError: NotifyError;
 
 	constructor(
 		tui: MinimalTui,
 		theme: any,
 		keybindings: KeybindingsManager,
 		externalDone: (r: ReadModeResult | null) => void,
+		notifyError: NotifyError,
 	) {
 		this.tui = tui;
 		this.theme = theme;
 		this.keybindings = keybindings;
+		this.notifyError = notifyError;
 		this.editor = new Editor(tui as any, createEditorTheme(theme), { paddingX: 0 });
 		this.editor.focused = this.isFocused;
 		this.editor.onSubmit = (text: string) => {
@@ -314,6 +320,7 @@ export class ReadModeComponent implements Component, Focusable {
 				this.tui.requestRender(true);
 			}
 		} catch {
+			this.notifyError(EXTERNAL_EDITOR_ERROR_MESSAGE);
 			this.tui.requestRender(true);
 		} finally {
 			if (this.fullscreenActive) this.tui.terminal.write("\x1b[?1000h\x1b[?1006h");
@@ -487,7 +494,7 @@ export class ReadModeComponent implements Component, Focusable {
 export function openReadMode(pi: ExtensionAPI, ui: any): Promise<void> {
 	return ui.custom(
 		(tui: MinimalTui, theme: any, keybindings: KeybindingsManager, done: (r: ReadModeResult | null) => void) => {
-			return new ReadModeComponent(tui, theme, keybindings, done);
+			return new ReadModeComponent(tui, theme, keybindings, done, (message) => ui.notify(message, "error"));
 		},
 	).then((result: ReadModeResult | null) => {
 		if (result?.text) pi.sendUserMessage(result.text);
