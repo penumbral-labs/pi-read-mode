@@ -233,6 +233,22 @@ test("external editor success replaces draft, restores TUI, redraws, and removes
   assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
 });
 
+test("external editor success normalizes CRLF line endings and removes the final newline", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  const tui = makeTui();
+  const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'first\\r\\nsecond\\r\\n')");
+
+  const edited = await editDraftInExternalEditor("draft", tui, {
+    editorCommand: command,
+    tmpDir: tmp,
+    announce: false,
+  });
+
+  assert.equal(edited, "first\nsecond");
+  assert.doesNotMatch(edited, /\r/);
+  assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+});
+
 test("external editor failure preserves draft by returning undefined and still restores TUI", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
   const tui = makeTui();
@@ -249,6 +265,41 @@ test("external editor failure preserves draft by returning undefined and still r
   assert.equal(tui.started, 1);
   assert.deepEqual(tui.renders, [true]);
   assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+});
+
+test("external editor process failure preserves draft, notifies, redraws, and restores state", async () => {
+  const notifications = [];
+  const { component, tui } = makeReadMode({ notifyError: (message) => notifications.push(message) });
+  await mount(component);
+  input(component, "keep this draft");
+
+  const originalEnv = {
+    VISUAL: process.env.VISUAL,
+    EDITOR: process.env.EDITOR,
+  };
+
+  try {
+    process.env.VISUAL = nodeEditorCommand("process.exit(2)");
+    delete process.env.EDITOR;
+
+    component.handleInput("\x07");
+    for (let i = 0; i < 50 && notifications.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  } finally {
+    for (const [name, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  assert.equal(component.getDraft(), "keep this draft");
+  assert.equal(tui.stopped, 1);
+  assert.equal(tui.started, 1);
+  assert.deepEqual(tui.writes.slice(-2), ["\x1b[?1000l\x1b[?1006l", "\x1b[?1000h\x1b[?1006h"]);
+  assert.deepEqual(tui.renders.slice(-2), [true, true]);
+  assert.equal(component.externalEditorOpen, false);
+  assert.deepEqual(notifications, ["External editor failed"]);
 });
 
 test("external editor temp creation rejection preserves draft, notifies, and restores mouse state", async () => {

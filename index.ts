@@ -147,7 +147,7 @@ export async function editDraftInExternalEditor(
 		});
 
 		if (status !== 0) return undefined;
-		return readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
+		return readFileSync(tmpFile, "utf-8").replace(/\r\n/g, "\n").replace(/\n$/, "");
 	} finally {
 		if (draftDir) rmSync(draftDir, { recursive: true, force: true });
 		if (tuiStopped) {
@@ -317,6 +317,9 @@ export class ReadModeComponent implements Component, Focusable {
 			const edited = await editDraftInExternalEditor(this.editor.getExpandedText(), this.tui);
 			if (edited !== undefined) {
 				this.editor.setText(edited);
+				this.tui.requestRender(true);
+			} else {
+				this.notifyError(EXTERNAL_EDITOR_ERROR_MESSAGE);
 				this.tui.requestRender(true);
 			}
 		} catch {
