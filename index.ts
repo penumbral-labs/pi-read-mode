@@ -122,45 +122,15 @@ function isWindowsCommandScript(editor: string): boolean {
 	return /\.(?:cmd|bat)$/i.test(editor);
 }
 
-function quoteWindowsCommandArgument(arg: string): string {
-	let result = '"';
-	let backslashes = 0;
-
-	for (const char of arg) {
-		if (char === "\\") {
-			backslashes++;
-			continue;
-		}
-		if (char === '"') {
-			result += "\\".repeat(backslashes * 2 + 1);
-			result += char;
-			backslashes = 0;
-			continue;
-		}
-		result += "\\".repeat(backslashes);
-		backslashes = 0;
-		result += char;
-	}
-
-	result += "\\".repeat(backslashes * 2);
-	result += '"';
-	return result;
-}
-
 export function getExternalEditorSpawnInvocation(
 	editor: string,
 	editorArgs: string[],
 	tmpFile: string,
 	platform: NodeJS.Platform = process.platform,
-	comSpec: string | undefined = process.env.ComSpec,
 ): EditorSpawnInvocation {
 	const args = [...editorArgs, tmpFile];
 	if (platform === "win32" && isWindowsCommandScript(editor)) {
-		const commandLine = [editor, ...args].map(quoteWindowsCommandArgument).join(" ");
-		return {
-			command: comSpec || "cmd.exe",
-			args: ["/d", "/s", "/c", `"${commandLine}"`],
-		};
+		throw new Error("Windows .cmd/.bat editor commands are not supported; configure VISUAL/EDITOR to use an .exe or native executable.");
 	}
 	return { command: editor, args };
 }

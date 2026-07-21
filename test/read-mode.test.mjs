@@ -234,24 +234,17 @@ test("Windows editor spawn invocation preserves spaced executable and temp paths
       ],
     },
   );
+});
 
-  assert.deepEqual(
-    getExternalEditorSpawnInvocation(
+test("Windows editor spawn invocation rejects command scripts", () => {
+  assert.throws(
+    () => getExternalEditorSpawnInvocation(
       "C:\\Program Files\\Editor\\editor.cmd",
       ["--wait", "two words"],
       "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md",
       "win32",
-      "C:\\Windows\\System32\\cmd.exe",
     ),
-    {
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: [
-        "/d",
-        "/s",
-        "/c",
-        '""C:\\Program Files\\Editor\\editor.cmd" "--wait" "two words" "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md""',
-      ],
-    },
+    /Windows \.cmd\/\.bat editor commands are not supported/,
   );
 });
 
