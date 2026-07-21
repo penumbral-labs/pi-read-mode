@@ -215,8 +215,18 @@ test("external editor helpers resolve and split editor commands", () => {
     "--wait",
   ]);
   assert.deepEqual(splitEditorCommand('emacsclient -a "" -c'), ["emacsclient", "-a", "", "-c"]);
+});
+
+test("external editor command splitting preserves unquoted UNC executable prefixes", () => {
   assert.deepEqual(splitEditorCommand("\\\\server\\share\\editor.exe --wait"), ["\\\\server\\share\\editor.exe", "--wait"]);
+});
+
+test("external editor command splitting preserves quoted UNC executable prefixes", () => {
   assert.deepEqual(splitEditorCommand('"\\\\server\\share\\editor.exe" --wait'), ["\\\\server\\share\\editor.exe", "--wait"]);
+});
+
+test("external editor command splitting decodes non-prefix doubled backslashes", () => {
+  assert.deepEqual(splitEditorCommand("editor --path=C:\\\\tmp"), ["editor", "--path=C:\\tmp"]);
 });
 
 test("Windows editor spawn invocation preserves spaced executable and temp paths", () => {

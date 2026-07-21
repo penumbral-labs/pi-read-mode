@@ -75,7 +75,13 @@ export function splitEditorCommand(command: string): string[] {
 		const next = command[i + 1];
 
 		if (char === "\\" && next !== undefined) {
-			if (next === "'" || next === '"' || /\s/.test(next)) {
+			if (next === "\\" && current === "" && (!tokenStarted || quote !== null)) {
+				current += "\\\\";
+				tokenStarted = true;
+				i++;
+				continue;
+			}
+			if (next === "\\" || next === "'" || next === '"' || /\s/.test(next)) {
 				current += next;
 				tokenStarted = true;
 				i++;
