@@ -215,6 +215,8 @@ test("external editor helpers resolve and split editor commands", () => {
     "--wait",
   ]);
   assert.deepEqual(splitEditorCommand('emacsclient -a "" -c'), ["emacsclient", "-a", "", "-c"]);
+  assert.deepEqual(splitEditorCommand("\\\\server\\share\\editor.exe --wait"), ["\\\\server\\share\\editor.exe", "--wait"]);
+  assert.deepEqual(splitEditorCommand('"\\\\server\\share\\editor.exe" --wait'), ["\\\\server\\share\\editor.exe", "--wait"]);
 });
 
 test("Windows editor spawn invocation preserves spaced executable and temp paths", () => {
@@ -252,7 +254,7 @@ test("external editor success replaces draft, restores TUI, redraws, and removes
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
   try {
     const tui = makeTui();
-    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited\\n')");
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited' + String.fromCharCode(10))");
 
     const edited = await editDraftInExternalEditor("draft", tui, {
       editorCommand: command,
@@ -274,7 +276,7 @@ test("external editor success normalizes CRLF line endings and removes the final
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
   try {
     const tui = makeTui();
-    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'first\\r\\nsecond\\r\\n')");
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'first' + String.fromCharCode(13, 10) + 'second' + String.fromCharCode(13, 10))");
 
     const edited = await editDraftInExternalEditor("draft", tui, {
       editorCommand: command,
@@ -312,11 +314,35 @@ test("external editor failure preserves draft by returning undefined and still r
   }
 });
 
-test("external editor cleanup failure still restarts TUI and preserves cleanup error", async () => {
+test("external editor cleanup failure after success returns edited text and restores TUI", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
   try {
     const tui = makeTui();
-    const command = nodeEditorCommand("process.exit(0)");
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited' + String.fromCharCode(10))");
+
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+      cleanupDraftDir() {
+        throw new Error("cleanup failed");
+      },
+    });
+
+    assert.equal(edited, "edited");
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("external editor original error is not replaced by cleanup failure", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("require('node:fs').rmSync(process.argv.at(-1))");
     const cleanupError = new Error("cleanup failed");
 
     await assert.rejects(
@@ -328,7 +354,11 @@ test("external editor cleanup failure still restarts TUI and preserves cleanup e
           throw cleanupError;
         },
       }),
-      cleanupError,
+      (error) => {
+        assert.notEqual(error, cleanupError);
+        assert.equal(error.code, "ENOENT");
+        return true;
+      },
     );
 
     assert.equal(tui.stopped, 1);

@@ -75,7 +75,7 @@ export function splitEditorCommand(command: string): string[] {
 		const next = command[i + 1];
 
 		if (char === "\\" && next !== undefined) {
-			if (next === "\\" || next === "'" || next === '"' || /\s/.test(next)) {
+			if (next === "'" || next === '"' || /\s/.test(next)) {
 				current += next;
 				tokenStarted = true;
 				i++;
@@ -154,6 +154,12 @@ export async function editDraftInExternalEditor(
 	let draftDir: string | undefined;
 	let tmpFile: string | undefined;
 	let tuiStopped = false;
+	let editorCompleted = false;
+	let completedEditorResult: string | undefined;
+	let successfulEditorResult: string | undefined;
+	let hasEarlierError = false;
+	let earlierError: unknown;
+	let hasCleanupError = false;
 	let cleanupError: unknown;
 
 	try {
@@ -176,21 +182,32 @@ export async function editDraftInExternalEditor(
 			child.on("close", (code) => resolve(code));
 		});
 
-		if (status !== 0) return undefined;
-		return readFileSync(tmpFile, "utf-8").replace(/\r\n/g, "\n").replace(/\n$/, "");
-	} finally {
-		try {
-			if (draftDir) (options.cleanupDraftDir ?? ((dir: string) => rmSync(dir, { recursive: true, force: true })))(draftDir);
-		} catch (error) {
-			cleanupError = error;
-		} finally {
-			if (tuiStopped) {
-				tui.start();
-				tui.requestRender(true);
-			}
+		if (status === 0) {
+			successfulEditorResult = readFileSync(tmpFile, "utf-8").replace(/\r\n/g, "\n").replace(/\n$/, "");
+			completedEditorResult = successfulEditorResult;
 		}
-		if (cleanupError !== undefined) throw cleanupError;
+		editorCompleted = true;
+	} catch (error) {
+		hasEarlierError = true;
+		earlierError = error;
 	}
+
+	try {
+		if (draftDir) (options.cleanupDraftDir ?? ((dir: string) => rmSync(dir, { recursive: true, force: true })))(draftDir);
+	} catch (error) {
+		hasCleanupError = true;
+		cleanupError = error;
+	} finally {
+		if (tuiStopped) {
+			tui.start();
+			tui.requestRender(true);
+		}
+	}
+
+	if (editorCompleted) return completedEditorResult;
+	if (hasEarlierError) throw earlierError;
+	if (hasCleanupError) throw cleanupError;
+	return undefined;
 }
 
 // ── Theme adapter ───────────────────────────────────────────────────────────
