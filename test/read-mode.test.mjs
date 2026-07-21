@@ -182,19 +182,39 @@ test("mouse wheel scrolls history while composing", async () => {
   assert.equal(component.scrollOffset, 0);
 });
 
-test("composer growth at history bottom keeps newest history anchored", async () => {
+test("first fullscreen render starts at bottom using the initial viewport", async () => {
+  const { component } = makeReadMode({ rows: 16, historyLines: 40 });
+  await mount(component, 50);
+
+  assert.ok(component.contentLines.length > component.viewportRows);
+  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
+});
+
+test("composer growth and shrink at history bottom keep newest history anchored", async () => {
   const { component, tui } = makeReadMode({ rows: 16, historyLines: 40 });
   const initial = await mount(component, 50);
   const initialViewportRows = component.viewportRows;
 
   component.setDraft(["one", "two", "three", "four", "five", "six"].join("\n"));
   const grown = component.render(50);
+  const grownViewportRows = component.viewportRows;
+  const grownMax = component.contentLines.length - component.viewportRows;
 
   assert.equal(initial.length, tui.terminal.rows);
   assert.equal(grown.length, tui.terminal.rows);
-  assert.ok(component.viewportRows < initialViewportRows);
-  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows);
-  assert.equal(component.contentLines.length - (component.scrollOffset + component.viewportRows), 0);
+  assert.ok(grownViewportRows < initialViewportRows);
+  assert.equal(component.scrollOffset, grownMax);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
+
+  component.setDraft("one");
+  component.render(50);
+  const shrunkMax = component.contentLines.length - component.viewportRows;
+
+  assert.ok(component.viewportRows > grownViewportRows);
+  assert.ok(shrunkMax < grownMax);
+  assert.equal(component.scrollOffset, shrunkMax);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
 });
 
 test("composer growth preserves offset when history is scrolled up", async () => {
