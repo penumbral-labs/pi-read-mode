@@ -492,12 +492,15 @@ export class ReadModeComponent implements Component, Focusable {
 		}
 
 		const contentRows = Math.max(0, availableBeforeEditor - chromeCount());
-		this.viewportRows = Math.max(1, contentRows);
 		const total = all.length;
-		const maxS = Math.max(0, total - contentRows);
+		const wasAtBottom = this.scrollOffset >= this.maxScroll();
+		this.viewportRows = Math.max(1, contentRows);
+		const maxS = this.maxScroll();
 		// On first fullscreen render, jump to bottom so most recent content is visible.
 		if (this.startAtBottom) {
 			this.startAtBottom = false;
+			this.scrollOffset = maxS;
+		} else if (wasAtBottom) {
 			this.scrollOffset = maxS;
 		}
 		if (this.scrollOffset > maxS) this.scrollOffset = maxS;

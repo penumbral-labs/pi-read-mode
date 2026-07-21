@@ -182,8 +182,8 @@ test("mouse wheel scrolls history while composing", async () => {
   assert.equal(component.scrollOffset, 0);
 });
 
-test("composer growth reduces history viewport and render stays bounded", async () => {
-  const { component, tui } = makeReadMode({ rows: 14, historyLines: 40 });
+test("composer growth at history bottom keeps newest history anchored", async () => {
+  const { component, tui } = makeReadMode({ rows: 16, historyLines: 40 });
   const initial = await mount(component, 50);
   const initialViewportRows = component.viewportRows;
 
@@ -193,6 +193,21 @@ test("composer growth reduces history viewport and render stays bounded", async 
   assert.equal(initial.length, tui.terminal.rows);
   assert.equal(grown.length, tui.terminal.rows);
   assert.ok(component.viewportRows < initialViewportRows);
+  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows);
+  assert.equal(component.contentLines.length - (component.scrollOffset + component.viewportRows), 0);
+});
+
+test("composer growth preserves offset when history is scrolled up", async () => {
+  const { component } = makeReadMode({ rows: 16, historyLines: 40 });
+  await mount(component, 50);
+  component.handleInput("\x1b[1;3A");
+  component.handleInput("\x1b[1;3A");
+  const scrolledUpOffset = component.scrollOffset;
+
+  component.setDraft(["one", "two", "three", "four", "five", "six"].join("\n"));
+  component.render(50);
+
+  assert.equal(component.scrollOffset, scrolledUpOffset);
 });
 
 test("focus propagates to the embedded editor cursor marker", async () => {
