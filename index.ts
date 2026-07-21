@@ -40,9 +40,15 @@ interface ExternalEditorOptions {
 	editorCommand?: string;
 	tmpDir?: string;
 	announce?: boolean;
+	cleanupDraftDir?: (draftDir: string) => void;
 }
 
 type NotifyError = (message: string) => void;
+
+interface EditorSpawnInvocation {
+	command: string;
+	args: string[];
+}
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -61,6 +67,7 @@ const WHEEL_DOWN = 65;
 export function splitEditorCommand(command: string): string[] {
 	const parts: string[] = [];
 	let current = "";
+	let tokenStarted = false;
 	let quote: "'" | '"' | null = null;
 
 	for (let i = 0; i < command.length; i++) {
@@ -70,10 +77,12 @@ export function splitEditorCommand(command: string): string[] {
 		if (char === "\\" && next !== undefined) {
 			if (next === "\\" || next === "'" || next === '"' || /\s/.test(next)) {
 				current += next;
+				tokenStarted = true;
 				i++;
 				continue;
 			}
 			current += char;
+			tokenStarted = true;
 			continue;
 		}
 
@@ -88,22 +97,72 @@ export function splitEditorCommand(command: string): string[] {
 
 		if (char === "'" || char === '"') {
 			quote = char;
+			tokenStarted = true;
 			continue;
 		}
 
 		if (/\s/.test(char)) {
-			if (current) {
+			if (tokenStarted) {
 				parts.push(current);
 				current = "";
+				tokenStarted = false;
 			}
 			continue;
 		}
 
 		current += char;
+		tokenStarted = true;
 	}
 
-	if (current) parts.push(current);
+	if (tokenStarted) parts.push(current);
 	return parts;
+}
+
+function isWindowsCommandScript(editor: string): boolean {
+	return /\.(?:cmd|bat)$/i.test(editor);
+}
+
+function quoteWindowsCommandArgument(arg: string): string {
+	let result = '"';
+	let backslashes = 0;
+
+	for (const char of arg) {
+		if (char === "\\") {
+			backslashes++;
+			continue;
+		}
+		if (char === '"') {
+			result += "\\".repeat(backslashes * 2 + 1);
+			result += char;
+			backslashes = 0;
+			continue;
+		}
+		result += "\\".repeat(backslashes);
+		backslashes = 0;
+		result += char;
+	}
+
+	result += "\\".repeat(backslashes * 2);
+	result += '"';
+	return result;
+}
+
+export function getExternalEditorSpawnInvocation(
+	editor: string,
+	editorArgs: string[],
+	tmpFile: string,
+	platform: NodeJS.Platform = process.platform,
+	comSpec: string | undefined = process.env.ComSpec,
+): EditorSpawnInvocation {
+	const args = [...editorArgs, tmpFile];
+	if (platform === "win32" && isWindowsCommandScript(editor)) {
+		const commandLine = [editor, ...args].map(quoteWindowsCommandArgument).join(" ");
+		return {
+			command: comSpec || "cmd.exe",
+			args: ["/d", "/s", "/c", `"${commandLine}"`],
+		};
+	}
+	return { command: editor, args };
 }
 
 export function getExternalEditorCommand(
@@ -125,6 +184,7 @@ export async function editDraftInExternalEditor(
 	let draftDir: string | undefined;
 	let tmpFile: string | undefined;
 	let tuiStopped = false;
+	let cleanupError: unknown;
 
 	try {
 		draftDir = mkdtempSync(join(options.tmpDir ?? tmpdir(), "pi-read-mode-"));
@@ -137,10 +197,10 @@ export async function editDraftInExternalEditor(
 			process.stdout.write(`Launching external editor: ${editorCommand}\nPi will resume when the editor exits.\n`);
 		}
 
+		const invocation = getExternalEditorSpawnInvocation(editor, editorArgs, tmpFile);
 		const status = await new Promise<number | null>((resolve) => {
-			const child = spawn(editor, [...editorArgs, tmpFile!], {
+			const child = spawn(invocation.command, invocation.args, {
 				stdio: "inherit",
-				shell: process.platform === "win32",
 			});
 			child.on("error", () => resolve(null));
 			child.on("close", (code) => resolve(code));
@@ -149,11 +209,17 @@ export async function editDraftInExternalEditor(
 		if (status !== 0) return undefined;
 		return readFileSync(tmpFile, "utf-8").replace(/\r\n/g, "\n").replace(/\n$/, "");
 	} finally {
-		if (draftDir) rmSync(draftDir, { recursive: true, force: true });
-		if (tuiStopped) {
-			tui.start();
-			tui.requestRender(true);
+		try {
+			if (draftDir) (options.cleanupDraftDir ?? ((dir: string) => rmSync(dir, { recursive: true, force: true })))(draftDir);
+		} catch (error) {
+			cleanupError = error;
+		} finally {
+			if (tuiStopped) {
+				tui.start();
+				tui.requestRender(true);
+			}
 		}
+		if (cleanupError !== undefined) throw cleanupError;
 	}
 }
 

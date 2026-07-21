@@ -12,6 +12,7 @@ const {
   default: registerReadMode,
   editDraftInExternalEditor,
   getExternalEditorCommand,
+  getExternalEditorSpawnInvocation,
   splitEditorCommand,
 } = extension;
 
@@ -213,58 +214,136 @@ test("external editor helpers resolve and split editor commands", () => {
     "/Applications/MacVim.app/Contents/bin/mvim",
     "--wait",
   ]);
+  assert.deepEqual(splitEditorCommand('emacsclient -a "" -c'), ["emacsclient", "-a", "", "-c"]);
+});
+
+test("Windows editor spawn invocation preserves spaced executable and temp paths", () => {
+  assert.deepEqual(
+    getExternalEditorSpawnInvocation(
+      "C:\\Program Files\\Editor\\editor.exe",
+      ["--wait", "--name=two words"],
+      "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md",
+      "win32",
+    ),
+    {
+      command: "C:\\Program Files\\Editor\\editor.exe",
+      args: [
+        "--wait",
+        "--name=two words",
+        "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md",
+      ],
+    },
+  );
+
+  assert.deepEqual(
+    getExternalEditorSpawnInvocation(
+      "C:\\Program Files\\Editor\\editor.cmd",
+      ["--wait", "two words"],
+      "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md",
+      "win32",
+      "C:\\Windows\\System32\\cmd.exe",
+    ),
+    {
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        '""C:\\Program Files\\Editor\\editor.cmd" "--wait" "two words" "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md""',
+      ],
+    },
+  );
 });
 
 test("external editor success replaces draft, restores TUI, redraws, and removes temp file", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
-  const tui = makeTui();
-  const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited\\n')");
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited\\n')");
 
-  const edited = await editDraftInExternalEditor("draft", tui, {
-    editorCommand: command,
-    tmpDir: tmp,
-    announce: false,
-  });
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+    });
 
-  assert.equal(edited, "edited");
-  assert.equal(tui.stopped, 1);
-  assert.equal(tui.started, 1);
-  assert.deepEqual(tui.renders, [true]);
-  assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+    assert.equal(edited, "edited");
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+    assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("external editor success normalizes CRLF line endings and removes the final newline", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
-  const tui = makeTui();
-  const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'first\\r\\nsecond\\r\\n')");
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'first\\r\\nsecond\\r\\n')");
 
-  const edited = await editDraftInExternalEditor("draft", tui, {
-    editorCommand: command,
-    tmpDir: tmp,
-    announce: false,
-  });
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+    });
 
-  assert.equal(edited, "first\nsecond");
-  assert.doesNotMatch(edited, /\r/);
-  assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+    assert.equal(edited, "first\nsecond");
+    assert.doesNotMatch(edited, /\r/);
+    assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("external editor failure preserves draft by returning undefined and still restores TUI", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
-  const tui = makeTui();
-  const command = nodeEditorCommand("process.exit(2)");
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("process.exit(2)");
 
-  const edited = await editDraftInExternalEditor("draft", tui, {
-    editorCommand: command,
-    tmpDir: tmp,
-    announce: false,
-  });
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+    });
 
-  assert.equal(edited, undefined);
-  assert.equal(tui.stopped, 1);
-  assert.equal(tui.started, 1);
-  assert.deepEqual(tui.renders, [true]);
-  assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+    assert.equal(edited, undefined);
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+    assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("external editor cleanup failure still restarts TUI and preserves cleanup error", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("process.exit(0)");
+    const cleanupError = new Error("cleanup failed");
+
+    await assert.rejects(
+      () => editDraftInExternalEditor("draft", tui, {
+        editorCommand: command,
+        tmpDir: tmp,
+        announce: false,
+        cleanupDraftDir() {
+          throw cleanupError;
+        },
+      }),
+      cleanupError,
+    );
+
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("external editor process failure preserves draft, notifies, redraws, and restores state", async () => {
