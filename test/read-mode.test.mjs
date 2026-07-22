@@ -7,6 +7,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url);
 const extension = await jiti.import("../index.ts");
+const { visibleWidth } = await jiti.import("@earendil-works/pi-tui");
 const {
   ReadModeComponent,
   default: registerReadMode,
@@ -58,12 +59,20 @@ function makeTui(rows = 16) {
   };
 }
 
-function makeReadMode({ rows = 16, historyLines = 24, notifyError = () => {} } = {}) {
+function wrapHistoryLine(text, width) {
+  const chunkWidth = Math.max(1, width);
+  const chunks = [];
+  for (let i = 0; i < text.length; i += chunkWidth) chunks.push(text.slice(i, i + chunkWidth));
+  return chunks.length > 0 ? chunks : [""];
+}
+
+function makeReadMode({ rows = 16, historyLines = 24, historyEntries, notifyError = () => {} } = {}) {
   const tui = makeTui(rows);
   const doneResults = [];
   const history = {
     invalidate() {},
-    render() {
+    render(width) {
+      if (historyEntries) return historyEntries.flatMap((line) => wrapHistoryLine(line, width));
       return Array.from({ length: historyLines }, (_, i) => `history-${String(i + 1).padStart(2, "0")}`);
     },
   };
@@ -228,6 +237,71 @@ test("composer growth preserves offset when history is scrolled up", async () =>
   component.render(50);
 
   assert.equal(component.scrollOffset, scrolledUpOffset);
+});
+
+test("width reflow at history bottom keeps newest history anchored", async () => {
+  const { component } = makeReadMode({
+    rows: 16,
+    historyEntries: Array.from(
+      { length: 18 },
+      (_, i) => `entry-${String(i + 1).padStart(2, "0")}-${"x".repeat(32)}`,
+    ),
+  });
+  await mount(component, 48);
+  const wideLineCount = component.contentLines.length;
+
+  component.render(18);
+
+  assert.ok(component.contentLines.length > wideLineCount, "narrow width should reflow history into more lines");
+  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
+});
+
+test("width reflow while scrolled up preserves the deliberate offset", async () => {
+  const { component } = makeReadMode({
+    rows: 16,
+    historyEntries: Array.from(
+      { length: 18 },
+      (_, i) => `entry-${String(i + 1).padStart(2, "0")}-${"x".repeat(32)}`,
+    ),
+  });
+  await mount(component, 48);
+  component.handleInput("\x1b[1;3A");
+  component.handleInput("\x1b[1;3A");
+  const scrolledUpOffset = component.scrollOffset;
+  const wideLineCount = component.contentLines.length;
+
+  assert.ok(scrolledUpOffset > 0, "test setup should be deliberately scrolled up from bottom");
+  assert.ok(scrolledUpOffset < wideLineCount - component.viewportRows, "test setup should not still be at bottom");
+
+  component.render(18);
+
+  assert.ok(component.contentLines.length > wideLineCount, "narrow width should reflow history into more lines");
+  assert.equal(component.scrollOffset, scrolledUpOffset);
+});
+
+test("labeled read-mode rule stays within narrow render widths", async () => {
+  const { component } = makeReadMode({ rows: 4, historyLines: 1 });
+  await mount(component, 60);
+
+  for (const width of [0, 1, 2, 5, 10]) {
+    const [title] = component.render(width);
+    assert.equal(visibleWidth(title ?? ""), width);
+  }
+});
+
+test("labeled read-mode rule preserves full label layout when it fits", async () => {
+  const { component } = makeReadMode({ rows: 4, historyLines: 1 });
+  await mount(component, 60);
+
+  assert.equal(component.render(12)[0], "─ Read Mode ");
+});
+
+test("unlabeled read-mode rule keeps the requested width", async () => {
+  const { component } = makeReadMode({ rows: 16, historyLines: 1 });
+  await mount(component, 60);
+
+  assert.equal(component.render(12)[3], "─".repeat(12));
 });
 
 test("focus propagates to the embedded editor cursor marker", async () => {

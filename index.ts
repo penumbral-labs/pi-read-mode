@@ -433,7 +433,7 @@ export class ReadModeComponent implements Component, Focusable {
 	private renderHr(width: number, text?: string): string {
 		if (width <= 0) return "";
 		if (!text) return themeFg(this.theme, "border", "─".repeat(width));
-		const label = ` ${text} `;
+		const label = truncateToWidth(` ${text} `, width);
 		const lw = visibleWidth(label);
 		const rem = Math.max(0, width - lw);
 		const left = Math.min(3, rem);
@@ -464,6 +464,7 @@ export class ReadModeComponent implements Component, Focusable {
 
 		const th = this.theme;
 		const termRows = Math.max(1, this.tui.terminal.rows);
+		const wasAtBottom = this.scrollOffset >= this.maxScroll();
 		const all = this.renderContent(width);
 		const editorLines = this.renderEditor(width, termRows);
 		const editorRowCount = editorLines.length;
@@ -493,7 +494,6 @@ export class ReadModeComponent implements Component, Focusable {
 
 		const contentRows = Math.max(0, availableBeforeEditor - chromeCount());
 		const total = all.length;
-		const wasAtBottom = this.scrollOffset >= this.maxScroll();
 		this.viewportRows = Math.max(1, contentRows);
 		const maxS = this.maxScroll();
 		// On first fullscreen render, jump to bottom so most recent content is visible.
