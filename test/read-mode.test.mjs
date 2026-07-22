@@ -1,0 +1,604 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { createJiti } from "jiti";
+
+const jiti = createJiti(import.meta.url);
+const extension = await jiti.import("../index.ts");
+const { visibleWidth } = await jiti.import("@earendil-works/pi-tui");
+const {
+  ReadModeComponent,
+  default: registerReadMode,
+  editDraftInExternalEditor,
+  getExternalEditorCommand,
+  getExternalEditorSpawnInvocation,
+  splitEditorCommand,
+} = extension;
+
+const theme = {
+  fg(_color, text) {
+    return text;
+  },
+};
+
+function fakeKeybindings() {
+  return {
+    matches(data, action) {
+      if (action === "app.editor.external") return data === "\x07";
+      return false;
+    },
+  };
+}
+
+function makeTui(rows = 16) {
+  const writes = [];
+  return {
+    children: [],
+    renders: [],
+    started: 0,
+    stopped: 0,
+    terminal: {
+      rows,
+      columns: 80,
+      write(data) {
+        writes.push(data);
+      },
+    },
+    writes,
+    requestRender(force) {
+      this.renders.push(force === true);
+    },
+    start() {
+      this.started++;
+    },
+    stop() {
+      this.stopped++;
+    },
+  };
+}
+
+function wrapHistoryLine(text, width) {
+  const chunkWidth = Math.max(1, width);
+  const chunks = [];
+  for (let i = 0; i < text.length; i += chunkWidth) chunks.push(text.slice(i, i + chunkWidth));
+  return chunks.length > 0 ? chunks : [""];
+}
+
+function makeReadMode({ rows = 16, historyLines = 24, historyEntries, notifyError = () => {} } = {}) {
+  const tui = makeTui(rows);
+  const doneResults = [];
+  const history = {
+    invalidate() {},
+    render(width) {
+      if (historyEntries) return historyEntries.flatMap((line) => wrapHistoryLine(line, width));
+      return Array.from({ length: historyLines }, (_, i) => `history-${String(i + 1).padStart(2, "0")}`);
+    },
+  };
+  const component = new ReadModeComponent(tui, theme, fakeKeybindings(), (result) => doneResults.push(result), notifyError);
+  const container = {
+    children: [component],
+    invalidate() {},
+    render(width) {
+      return component.render(width);
+    },
+  };
+  tui.children = [history, container];
+  return { component, tui, doneResults };
+}
+
+async function mount(component, width = 60) {
+  component.render(width);
+  await new Promise((resolve) => setImmediate(resolve));
+  return component.render(width);
+}
+
+function input(component, text) {
+  for (const char of text) component.handleInput(char);
+}
+
+function nodeEditorCommand(code) {
+  return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`;
+}
+
+test("extension registers /read and Alt+R", () => {
+  const registered = { commands: [], shortcuts: [] };
+
+  registerReadMode({
+    registerCommand(name, options) {
+      registered.commands.push({ name, options });
+    },
+    registerShortcut(shortcut, options) {
+      registered.shortcuts.push({ shortcut, options });
+    },
+  });
+
+  assert.equal(registered.commands[0].name, "read");
+  assert.equal(registered.shortcuts[0].shortcut, "alt+r");
+});
+
+test("openReadMode sends submitted multiline text once", async () => {
+  let mounted;
+  const sent = [];
+
+  await extension.openReadMode(
+    {
+      sendUserMessage(text) {
+        sent.push(text);
+      },
+    },
+    {
+      async custom(factory) {
+        const tui = makeTui();
+        const component = factory(tui, theme, fakeKeybindings(), (result) => {
+          mounted.result = result;
+        });
+        mounted = { component, result: undefined };
+        component.setDraft("first\nsecond");
+        component.handleInput("\r");
+        return mounted.result;
+      },
+    },
+  );
+
+  assert.deepEqual(sent, ["first\nsecond"]);
+});
+
+test("native editor accepts newline input and submits multiline text once", async () => {
+  const { component, doneResults } = makeReadMode();
+  await mount(component);
+
+  input(component, "first line");
+  component.handleInput("\n");
+  input(component, "second line");
+  component.handleInput("\r");
+
+  assert.deepEqual(doneResults, [{ text: "first line\nsecond line" }]);
+});
+
+test("unmodified navigation stays with editor while Alt navigation scrolls history", async () => {
+  const { component } = makeReadMode({ rows: 14, historyLines: 40 });
+  await mount(component);
+  component.render(60);
+  const initialOffset = component.scrollOffset;
+
+  component.handleInput("\x1b[A");
+  assert.equal(component.scrollOffset, initialOffset, "plain Up must not scroll history");
+
+  component.handleInput("\x1b[1;3A");
+  assert.equal(component.scrollOffset, initialOffset - 1, "Alt+Up scrolls history one line");
+
+  component.handleInput("\x1b[1;3F");
+  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows, "Alt+End jumps to bottom");
+
+  component.handleInput("\x1b[1;3H");
+  assert.equal(component.scrollOffset, 0, "Alt+Home jumps to top");
+
+  component.handleInput("\x1b[6;3~");
+  assert.equal(component.scrollOffset, Math.max(1, component.viewportRows - 2), "Alt+PageDown scrolls by page");
+});
+
+test("mouse wheel scrolls history while composing", async () => {
+  const { component } = makeReadMode({ rows: 14, historyLines: 40 });
+  await mount(component);
+  component.handleInput("\x1b[1;3H");
+
+  component.handleInput("\x1b[<65;1;1M");
+  assert.equal(component.scrollOffset, 3);
+
+  component.handleInput("\x1b[<64;1;1M");
+  assert.equal(component.scrollOffset, 0);
+});
+
+test("first fullscreen render starts at bottom using the initial viewport", async () => {
+  const { component } = makeReadMode({ rows: 16, historyLines: 40 });
+  await mount(component, 50);
+
+  assert.ok(component.contentLines.length > component.viewportRows);
+  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
+});
+
+test("composer growth and shrink at history bottom keep newest history anchored", async () => {
+  const { component, tui } = makeReadMode({ rows: 16, historyLines: 40 });
+  const initial = await mount(component, 50);
+  const initialViewportRows = component.viewportRows;
+
+  component.setDraft(["one", "two", "three", "four", "five", "six"].join("\n"));
+  const grown = component.render(50);
+  const grownViewportRows = component.viewportRows;
+  const grownMax = component.contentLines.length - component.viewportRows;
+
+  assert.equal(initial.length, tui.terminal.rows);
+  assert.equal(grown.length, tui.terminal.rows);
+  assert.ok(grownViewportRows < initialViewportRows);
+  assert.equal(component.scrollOffset, grownMax);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
+
+  component.setDraft("one");
+  component.render(50);
+  const shrunkMax = component.contentLines.length - component.viewportRows;
+
+  assert.ok(component.viewportRows > grownViewportRows);
+  assert.ok(shrunkMax < grownMax);
+  assert.equal(component.scrollOffset, shrunkMax);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
+});
+
+test("composer growth preserves offset when history is scrolled up", async () => {
+  const { component } = makeReadMode({ rows: 16, historyLines: 40 });
+  await mount(component, 50);
+  component.handleInput("\x1b[1;3A");
+  component.handleInput("\x1b[1;3A");
+  const scrolledUpOffset = component.scrollOffset;
+
+  component.setDraft(["one", "two", "three", "four", "five", "six"].join("\n"));
+  component.render(50);
+
+  assert.equal(component.scrollOffset, scrolledUpOffset);
+});
+
+test("width reflow at history bottom keeps newest history anchored", async () => {
+  const { component } = makeReadMode({
+    rows: 16,
+    historyEntries: Array.from(
+      { length: 18 },
+      (_, i) => `entry-${String(i + 1).padStart(2, "0")}-${"x".repeat(32)}`,
+    ),
+  });
+  await mount(component, 48);
+  const wideLineCount = component.contentLines.length;
+
+  component.render(18);
+
+  assert.ok(component.contentLines.length > wideLineCount, "narrow width should reflow history into more lines");
+  assert.equal(component.scrollOffset, component.contentLines.length - component.viewportRows);
+  assert.equal(component.scrollOffset + component.viewportRows, component.contentLines.length);
+});
+
+test("width reflow while scrolled up preserves the deliberate offset", async () => {
+  const { component } = makeReadMode({
+    rows: 16,
+    historyEntries: Array.from(
+      { length: 18 },
+      (_, i) => `entry-${String(i + 1).padStart(2, "0")}-${"x".repeat(32)}`,
+    ),
+  });
+  await mount(component, 48);
+  component.handleInput("\x1b[1;3A");
+  component.handleInput("\x1b[1;3A");
+  const scrolledUpOffset = component.scrollOffset;
+  const wideLineCount = component.contentLines.length;
+
+  assert.ok(scrolledUpOffset > 0, "test setup should be deliberately scrolled up from bottom");
+  assert.ok(scrolledUpOffset < wideLineCount - component.viewportRows, "test setup should not still be at bottom");
+
+  component.render(18);
+
+  assert.ok(component.contentLines.length > wideLineCount, "narrow width should reflow history into more lines");
+  assert.equal(component.scrollOffset, scrolledUpOffset);
+});
+
+test("labeled read-mode rule stays within narrow render widths", async () => {
+  const { component } = makeReadMode({ rows: 4, historyLines: 1 });
+  await mount(component, 60);
+
+  for (const width of [0, 1, 2, 5, 10]) {
+    const [title] = component.render(width);
+    assert.equal(visibleWidth(title ?? ""), width);
+  }
+});
+
+test("labeled read-mode rule preserves full label layout when it fits", async () => {
+  const { component } = makeReadMode({ rows: 4, historyLines: 1 });
+  await mount(component, 60);
+
+  assert.equal(component.render(12)[0], "─ Read Mode ");
+});
+
+test("unlabeled read-mode rule keeps the requested width", async () => {
+  const { component } = makeReadMode({ rows: 16, historyLines: 1 });
+  await mount(component, 60);
+
+  assert.equal(component.render(12)[3], "─".repeat(12));
+});
+
+test("focus propagates to the embedded editor cursor marker", async () => {
+  const { component } = makeReadMode({ rows: 12, historyLines: 4 });
+  await mount(component, 50);
+
+  component.focused = true;
+  assert.match(component.render(50).join("\n"), /\x1b_pi:c\x07/);
+
+  component.focused = false;
+  assert.doesNotMatch(component.render(50).join("\n"), /\x1b_pi:c\x07/);
+});
+
+test("external editor helpers resolve and split editor commands", () => {
+  assert.equal(getExternalEditorCommand({ VISUAL: "nvim", EDITOR: "vim" }, "darwin"), "nvim");
+  assert.equal(getExternalEditorCommand({ EDITOR: "vim" }, "darwin"), "vim");
+  assert.equal(getExternalEditorCommand({}, "win32"), "notepad");
+  assert.deepEqual(splitEditorCommand('"/Applications/MacVim.app/Contents/bin/mvim" --wait'), [
+    "/Applications/MacVim.app/Contents/bin/mvim",
+    "--wait",
+  ]);
+  assert.deepEqual(splitEditorCommand('emacsclient -a "" -c'), ["emacsclient", "-a", "", "-c"]);
+});
+
+test("external editor command splitting preserves unquoted UNC executable prefixes", () => {
+  assert.deepEqual(splitEditorCommand("\\\\server\\share\\editor.exe --wait"), ["\\\\server\\share\\editor.exe", "--wait"]);
+});
+
+test("external editor command splitting preserves quoted UNC executable prefixes", () => {
+  assert.deepEqual(splitEditorCommand('"\\\\server\\share\\editor.exe" --wait'), ["\\\\server\\share\\editor.exe", "--wait"]);
+});
+
+test("external editor command splitting decodes non-prefix doubled backslashes", () => {
+  assert.deepEqual(splitEditorCommand("editor --path=C:\\\\tmp"), ["editor", "--path=C:\\tmp"]);
+});
+
+test("Windows editor spawn invocation preserves spaced executable and temp paths", () => {
+  assert.deepEqual(
+    getExternalEditorSpawnInvocation(
+      "C:\\Program Files\\Editor\\editor.exe",
+      ["--wait", "--name=two words"],
+      "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md",
+      "win32",
+    ),
+    {
+      command: "C:\\Program Files\\Editor\\editor.exe",
+      args: [
+        "--wait",
+        "--name=two words",
+        "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md",
+      ],
+    },
+  );
+});
+
+test("Windows editor spawn invocation rejects command scripts", () => {
+  assert.throws(
+    () => getExternalEditorSpawnInvocation(
+      "C:\\Program Files\\Editor\\editor.cmd",
+      ["--wait", "two words"],
+      "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\pi-read-mode-123\\draft.md",
+      "win32",
+    ),
+    /Windows \.cmd\/\.bat editor commands are not supported/,
+  );
+});
+
+test("external editor success replaces draft, restores TUI, redraws, and removes temp file", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited' + String.fromCharCode(10))");
+
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+    });
+
+    assert.equal(edited, "edited");
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+    assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("external editor success normalizes CRLF line endings and removes the final newline", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'first' + String.fromCharCode(13, 10) + 'second' + String.fromCharCode(13, 10))");
+
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+    });
+
+    assert.equal(edited, "first\nsecond");
+    assert.doesNotMatch(edited, /\r/);
+    assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("external editor failure preserves draft by returning undefined and still restores TUI", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("process.exit(2)");
+
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+    });
+
+    assert.equal(edited, undefined);
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+    assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("external editor cleanup failure after success returns edited text and restores TUI", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("require('node:fs').writeFileSync(process.argv.at(-1), 'edited' + String.fromCharCode(10))");
+
+    const edited = await editDraftInExternalEditor("draft", tui, {
+      editorCommand: command,
+      tmpDir: tmp,
+      announce: false,
+      cleanupDraftDir() {
+        throw new Error("cleanup failed");
+      },
+    });
+
+    assert.equal(edited, "edited");
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("external editor original error is not replaced by cleanup failure", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+  try {
+    const tui = makeTui();
+    const command = nodeEditorCommand("require('node:fs').rmSync(process.argv.at(-1))");
+    const cleanupError = new Error("cleanup failed");
+
+    await assert.rejects(
+      () => editDraftInExternalEditor("draft", tui, {
+        editorCommand: command,
+        tmpDir: tmp,
+        announce: false,
+        cleanupDraftDir() {
+          throw cleanupError;
+        },
+      }),
+      (error) => {
+        assert.notEqual(error, cleanupError);
+        assert.equal(error.code, "ENOENT");
+        return true;
+      },
+    );
+
+    assert.equal(tui.stopped, 1);
+    assert.equal(tui.started, 1);
+    assert.deepEqual(tui.renders, [true]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("external editor process failure preserves draft, notifies, redraws, and restores state", async () => {
+  const notifications = [];
+  const { component, tui } = makeReadMode({ notifyError: (message) => notifications.push(message) });
+  await mount(component);
+  input(component, "keep this draft");
+
+  const originalEnv = {
+    VISUAL: process.env.VISUAL,
+    EDITOR: process.env.EDITOR,
+  };
+
+  try {
+    process.env.VISUAL = nodeEditorCommand("process.exit(2)");
+    delete process.env.EDITOR;
+
+    component.handleInput("\x07");
+    for (let i = 0; i < 50 && notifications.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  } finally {
+    for (const [name, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  assert.equal(component.getDraft(), "keep this draft");
+  assert.equal(tui.stopped, 1);
+  assert.equal(tui.started, 1);
+  assert.deepEqual(tui.writes.slice(-2), ["\x1b[?1000l\x1b[?1006l", "\x1b[?1000h\x1b[?1006h"]);
+  assert.deepEqual(tui.renders.slice(-2), [true, true]);
+  assert.equal(component.externalEditorOpen, false);
+  assert.deepEqual(notifications, ["External editor failed"]);
+});
+
+test("external editor temp creation rejection preserves draft, notifies, and restores mouse state", async () => {
+  const notifications = [];
+  const { component, tui } = makeReadMode({ notifyError: (message) => notifications.push(message) });
+  await mount(component);
+  input(component, "keep this draft");
+
+  const originalEnv = {
+    TMPDIR: process.env.TMPDIR,
+    TMP: process.env.TMP,
+    TEMP: process.env.TEMP,
+  };
+  const missingTmp = join(tmpdir(), `pi-read-mode-missing-${process.pid}-${Date.now()}`, "child");
+  const unhandledRejections = [];
+  const onUnhandledRejection = (reason) => unhandledRejections.push(reason);
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  try {
+    process.env.TMPDIR = missingTmp;
+    process.env.TMP = missingTmp;
+    process.env.TEMP = missingTmp;
+
+    component.handleInput("\x07");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally {
+    for (const [name, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+
+  assert.equal(component.getDraft(), "keep this draft");
+  assert.equal(tui.stopped, 0);
+  assert.equal(tui.started, 0);
+  assert.deepEqual(tui.writes.slice(-2), ["\x1b[?1000l\x1b[?1006l", "\x1b[?1000h\x1b[?1006h"]);
+  assert.ok(tui.renders.includes(true));
+  assert.deepEqual(notifications, ["External editor failed"]);
+  assert.deepEqual(unhandledRejections, []);
+});
+
+test(
+  "external editor creates owner-only temp drafts on Unix",
+  { skip: process.platform === "win32" ? "POSIX file modes are not portable on Windows" : false },
+  async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-read-mode-test-"));
+    const modesFile = join(tmp, "modes.json");
+    const tui = makeTui();
+    const command = nodeEditorCommand([
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const draft = process.argv.at(-1);",
+      `fs.writeFileSync(${JSON.stringify(modesFile)}, JSON.stringify({`,
+      "  dir: (fs.statSync(path.dirname(draft)).mode & 0o777).toString(8),",
+      "  file: (fs.statSync(draft).mode & 0o777).toString(8),",
+      "  text: fs.readFileSync(draft, 'utf8'),",
+      "}));",
+    ].join(" "));
+    const oldUmask = process.umask(0);
+
+    try {
+      const edited = await editDraftInExternalEditor("draft", tui, {
+        editorCommand: command,
+        tmpDir: tmp,
+        announce: false,
+      });
+
+      assert.equal(edited, "draft");
+      assert.deepEqual(JSON.parse(readFileSync(modesFile, "utf-8")), {
+        dir: "700",
+        file: "600",
+        text: "draft",
+      });
+      assert.deepEqual(readdirSync(tmp).filter((name) => name.startsWith("pi-read-mode-")), []);
+    } finally {
+      process.umask(oldUmask);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+);
