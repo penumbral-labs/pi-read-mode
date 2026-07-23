@@ -255,6 +255,7 @@ export class ReadModeComponent implements Component, Focusable {
 	private viewportRows = 1;
 	private externalEditorOpen = false;
 	private notifyError: NotifyError;
+	private draftBeforeEditorInput: string | undefined;
 
 	constructor(
 		tui: MinimalTui,
@@ -262,6 +263,7 @@ export class ReadModeComponent implements Component, Focusable {
 		keybindings: KeybindingsManager,
 		externalDone: (r: ReadModeResult | null) => void,
 		notifyError: NotifyError,
+		initialDraft = "",
 	) {
 		this.tui = tui;
 		this.theme = theme;
@@ -269,9 +271,10 @@ export class ReadModeComponent implements Component, Focusable {
 		this.notifyError = notifyError;
 		this.editor = new Editor(tui as any, createEditorTheme(theme), { paddingX: 0 });
 		this.editor.focused = this.isFocused;
+		this.editor.setText(initialDraft);
 		this.editor.onSubmit = (text: string) => {
-			const trimmed = text.trim();
-			if (trimmed) this.wrappedDone({ text: trimmed });
+			const draft = this.draftBeforeEditorInput ?? text;
+			if (draft.trim()) this.wrappedDone({ text: draft });
 		};
 
 		this.wrappedDone = (result: ReadModeResult | null) => {
@@ -412,7 +415,12 @@ export class ReadModeComponent implements Component, Focusable {
 		if (matchesKey(data, "alt+home")) { this.scrollOffset = 0; this.tui.requestRender(); return; }
 		if (matchesKey(data, "alt+end")) { this.scrollOffset = this.maxScroll(); this.tui.requestRender(); return; }
 
-		this.editor.handleInput(data);
+		this.draftBeforeEditorInput = this.editor.getExpandedText();
+		try {
+			this.editor.handleInput(data);
+		} finally {
+			this.draftBeforeEditorInput = undefined;
+		}
 	}
 
 	// ── Rendering ─────────────────────────────────────────────────────────
@@ -556,14 +564,28 @@ export class ReadModeComponent implements Component, Focusable {
 
 // ── Entry points ────────────────────────────────────────────────────────────
 
-export function openReadMode(pi: ExtensionAPI, ui: any): Promise<void> {
-	return ui.custom(
-		(tui: MinimalTui, theme: any, keybindings: KeybindingsManager, done: (r: ReadModeResult | null) => void) => {
-			return new ReadModeComponent(tui, theme, keybindings, done, (message) => ui.notify(message, "error"));
-		},
-	).then((result: ReadModeResult | null) => {
-		if (result?.text) pi.sendUserMessage(result.text);
-	});
+export async function openReadMode(pi: ExtensionAPI, ui: any): Promise<void> {
+	const initialDraft = ui.getEditorText();
+	ui.setEditorText("");
+
+	let result: ReadModeResult | null | undefined;
+	try {
+		result = await ui.custom(
+			(tui: MinimalTui, theme: any, keybindings: KeybindingsManager, done: (r: ReadModeResult | null) => void) => {
+				return new ReadModeComponent(tui, theme, keybindings, done, (message) => ui.notify(message, "error"), initialDraft);
+			},
+		);
+	} catch (error) {
+		ui.setEditorText(initialDraft);
+		throw error;
+	}
+
+	if (result?.text) {
+		pi.sendUserMessage(result.text);
+		return;
+	}
+
+	ui.setEditorText(initialDraft);
 }
 
 export default function (pi: ExtensionAPI) {

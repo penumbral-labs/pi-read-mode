@@ -66,7 +66,7 @@ function wrapHistoryLine(text, width) {
   return chunks.length > 0 ? chunks : [""];
 }
 
-function makeReadMode({ rows = 16, historyLines = 24, historyEntries, notifyError = () => {} } = {}) {
+function makeReadMode({ rows = 16, historyLines = 24, historyEntries, notifyError = () => {}, initialDraft = "" } = {}) {
   const tui = makeTui(rows);
   const doneResults = [];
   const history = {
@@ -76,7 +76,7 @@ function makeReadMode({ rows = 16, historyLines = 24, historyEntries, notifyErro
       return Array.from({ length: historyLines }, (_, i) => `history-${String(i + 1).padStart(2, "0")}`);
     },
   };
-  const component = new ReadModeComponent(tui, theme, fakeKeybindings(), (result) => doneResults.push(result), notifyError);
+  const component = new ReadModeComponent(tui, theme, fakeKeybindings(), (result) => doneResults.push(result), notifyError, initialDraft);
   const container = {
     children: [component],
     invalidate() {},
@@ -118,9 +118,19 @@ test("extension registers /read and Alt+R", () => {
   assert.equal(registered.shortcuts[0].shortcut, "alt+r");
 });
 
-test("openReadMode sends submitted multiline text once", async () => {
+test("ReadModeComponent shows a prefilled draft", async () => {
+  const { component } = makeReadMode({ initialDraft: "prefilled draft" });
+  await mount(component);
+
+  assert.equal(component.getDraft(), "prefilled draft");
+  assert.match(component.render(60).join("\n"), /prefilled draft/);
+});
+
+test("openReadMode sends the full submitted draft once and leaves the core editor empty", async () => {
   let mounted;
+  let editorText = "  first\nsecond  ";
   const sent = [];
+  const setEditorTextCalls = [];
 
   await extension.openReadMode(
     {
@@ -129,20 +139,108 @@ test("openReadMode sends submitted multiline text once", async () => {
       },
     },
     {
+      getEditorText() {
+        return editorText;
+      },
+      setEditorText(text) {
+        setEditorTextCalls.push(text);
+        editorText = text;
+      },
       async custom(factory) {
+        const savedText = editorText;
         const tui = makeTui();
         const component = factory(tui, theme, fakeKeybindings(), (result) => {
           mounted.result = result;
         });
         mounted = { component, result: undefined };
-        component.setDraft("first\nsecond");
+        assert.equal(savedText, "", "core editor should be cleared before ui.custom saves its draft");
+        assert.equal(component.getDraft(), "  first\nsecond  ");
         component.handleInput("\r");
+        editorText = savedText;
         return mounted.result;
       },
     },
   );
 
-  assert.deepEqual(sent, ["first\nsecond"]);
+  assert.deepEqual(sent, ["  first\nsecond  "]);
+  assert.equal(editorText, "");
+  assert.deepEqual(setEditorTextCalls, [""]);
+});
+
+test("openReadMode restores the captured draft on cancel", async () => {
+  let mounted;
+  let editorText = "cancel me";
+  const sent = [];
+  const setEditorTextCalls = [];
+
+  await extension.openReadMode(
+    {
+      sendUserMessage(text) {
+        sent.push(text);
+      },
+    },
+    {
+      getEditorText() {
+        return editorText;
+      },
+      setEditorText(text) {
+        setEditorTextCalls.push(text);
+        editorText = text;
+      },
+      async custom(factory) {
+        const savedText = editorText;
+        const tui = makeTui();
+        const component = factory(tui, theme, fakeKeybindings(), (result) => {
+          mounted.result = result;
+        });
+        mounted = { component, result: undefined };
+        assert.equal(savedText, "");
+        assert.equal(component.getDraft(), "cancel me");
+        component.handleInput("\x1b");
+        editorText = savedText;
+        return mounted.result;
+      },
+    },
+  );
+
+  assert.deepEqual(sent, []);
+  assert.equal(editorText, "cancel me");
+  assert.deepEqual(setEditorTextCalls, ["", "cancel me"]);
+});
+
+test("openReadMode restores the captured draft when custom rejects", async () => {
+  let editorText = "restore after rejection";
+  const sent = [];
+  const setEditorTextCalls = [];
+  const error = new Error("custom failed");
+
+  await assert.rejects(
+    () => extension.openReadMode(
+      {
+        sendUserMessage(text) {
+          sent.push(text);
+        },
+      },
+      {
+        getEditorText() {
+          return editorText;
+        },
+        setEditorText(text) {
+          setEditorTextCalls.push(text);
+          editorText = text;
+        },
+        async custom() {
+          assert.equal(editorText, "");
+          throw error;
+        },
+      },
+    ),
+    error,
+  );
+
+  assert.deepEqual(sent, []);
+  assert.equal(editorText, "restore after rejection");
+  assert.deepEqual(setEditorTextCalls, ["", "restore after rejection"]);
 });
 
 test("native editor accepts newline input and submits multiline text once", async () => {
